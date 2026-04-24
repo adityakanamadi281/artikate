@@ -152,7 +152,7 @@ Inputs are treated as untrusted and cleaned to prevent prompt injection attacks.
 The system routes queries to appropriate workflows using controlled templates.
 This ensures accuracy, scalability, and safe execution of LLM pipelines.
 
-1. Input Sanitization:
+#### 1. Input Sanitization:
 Detect and block malicious instructions before they reach the model.
 Prevents prompt injection attacks
 Stops users from overriding system instructions
@@ -170,7 +170,7 @@ def sanitize_input(text):
     return safe
 ```
 
-2. Secure Prompt Construction (Instruction Hierarchy):
+#### 2. Secure Prompt Construction (Instruction Hierarchy):
 Separate system instructions from user input and enforce strict control.
 Prevents user override attacks
 Maintains instruction priority (system > user)
@@ -187,7 +187,7 @@ def build_prompt(user_input):
     ]
 ```
 
-3. Meta-Routing (Intent-Based Secure Execution):
+#### 3. Meta-Routing (Intent-Based Secure Execution):
 Classify user query and route to appropriate safe workflow.
 Prevents misuse of sensitive pipelines
 Reduces attack surface
@@ -207,7 +207,7 @@ def route_query(msg):
     return call_llm(prompt + msg)
 ```
 
-4. Dual LLM Validation (Output Verification):
+#### 4. Dual LLM Validation (Output Verification):
 Use multiple models to validate responses and reduce hallucinations.
 Detects incorrect or inconsistent outputs
 Adds redundancy and reliability
@@ -225,7 +225,7 @@ def dual_llm_validate(prompt):
     return call_llm(arb_prompt)
 ```
 
-5. Output Filtering & Data Protection:
+#### 5. Output Filtering & Data Protection:
 Filter sensitive or unsafe information before returning output.
 Prevents data leakage
 Protects sensitive information

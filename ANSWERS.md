@@ -1,93 +1,105 @@
 # Section 1: Diagnose a Failing LLM Pipeline
 
-## Problem 1: Confidently Wrong Answers About Product Pricing
+## Problem 1: Hallucinated Pricing
 
-### Diagnosis Log
+### Investigation
+I first checked whether the model’s pricing answers were grounded in retrieved, up-to-date data or coming from its internal memory. I compared incorrect responses with the actual pricing source of truth.
 
-Investigation started with a simple question: is the model answering from current product data or from its pretraining memory? I first compared wrong production answers against the authoritative pricing table in the source system. The failures were consistent with stale or missing retrieved facts, not random variation in wording. I then ruled out temperature as the primary cause by checking whether wrong answers were deterministic across repeated runs. If the same wrong price appears at low temperature and high temperature, that points away from sampling noise and toward missing grounding.
+### Ruled Out
+- Temperature randomness: Re-running queries at low temperature still produced the same incorrect prices.
+- Model capability issue: The model can answer correctly when given proper context.
 
-Next, I distinguished among the four candidate causes:
+### Root Cause
+This is a retrieval issue.
 
-- Prompt issue: test whether the prompt explicitly requires use of retrieved pricing data and refusal when pricing is absent.
-- Retrieval issue: inspect whether the correct pricing record is present in the retrieved context at all.
-- Model temperature issue: replay the same query at `temperature=0` and compare factual stability.
-- Knowledge cutoff issue: ask a pricing question with retrieval fully disabled. If the answer remains wrong and matches stale public pricing, the model is using outdated parametric knowledge.
+The model generated answers without access to correct or fresh pricing data. Since pricing is dynamic, relying on model memory leads to stale or hallucinated responses.
 
-Root cause identified: retrieval issue.
+### How to Distinguish Causes
+- Prompt issue → Check if prompt enforces use of retrieved data  
+- Retrieval issue → Verify if correct pricing appears in retrieved context  
+- Temperature issue → Test consistency at temperature=0  
+- Knowledge cutoff → Disable retrieval and observe outdated answers  
 
-Why:
+### Concrete Fix
+- Use a structured pricing database  
+- Enforce retrieval validation before answering  
+- Add freshness metadata and cache invalidation  
+- Require evidence-backed answers or refusal  
 
-- Pricing is a fast-changing business fact, so the correct system design should never rely on model memory.
-- In this failure pattern, the model answers confidently because it received either no pricing snippet, the wrong pricing snippet, or a stale cached result. The model is not the source of truth; the retrieval layer is.
+---
 
-Concrete fix:
+## Problem 2: Language Switching
 
-1. Store pricing in a structured source of truth, not only in unstructured documents.
-2. Add retrieval assertions for pricing intents: if no current pricing record is retrieved, refuse to answer.
-3. Add freshness metadata and invalidate stale caches.
-4. Update the prompt to require cited pricing evidence before answering.
+### Investigation
+I analyzed the instruction hierarchy (system prompt + user message). The system prompt is written in English, while users interact in Hindi or Arabic.
 
-## Problem 2: Responses Occasionally Switch to English for Hindi or Arabic Users
+### Ruled Out
+- Model limitation: The model supports multilingual responses  
+- Randomness: The issue is consistent under certain conditions  
 
-### Diagnosis Log
+### Root Cause
+The system prompt does not enforce language matching, so the model defaults to English.
 
-I investigated the message hierarchy first, because language drift in multilingual systems is usually caused by instruction precedence rather than model incapability. The likely architecture is a system prompt written in English plus a user message in Hindi or Arabic. When the system prompt says things like "You are a helpful assistant" but does not explicitly bind response language to the user input, the model often defaults to the dominant instruction language: English.
+### Mechanism
+- System prompt has higher priority  
+- Without language constraint, model follows English instructions  
 
-I ruled out model support as the cause because GPT-4o handles both Hindi and Arabic well. I also ruled out randomness as the main cause because the symptom is conditional: it happens more often when the user message contains mixed-language terms, copied product names, or short follow-ups like "why?" after an earlier English turn.
+### Concrete Fix
 
-Root cause identified: the system prompt does not explicitly constrain output language, so the model follows the higher-priority English instruction context.
-
-Specific prompt change:
-
-```text
+```
 System:
 You are a multilingual customer support assistant.
-Always answer in the same language as the user's latest message.
-Do not default to English unless the user's latest message is in English.
-If the latest user message mixes languages, use the language that dominates the message and preserve product names, URLs, code, and proper nouns exactly as written.
-If you are unsure which language dominates, ask a brief clarification question in the user's last-used language.
+
+Always respond in the same language as the user's latest message.
+Do not default to English unless the user writes in English.
+
+If the message contains multiple languages, use the dominant language.
+Preserve product names, URLs, and proper nouns exactly as written.
+
+If unsure about the language, ask a clarification question in the user's last-used language.
 ```
 
-Why this works:
+### Why This Works
+- Explicit system-level rule  
+- Based on latest user message  
+- Works for all languages  
 
-- It makes the language rule explicit at system level.
-- It keys off the latest user message, which is testable.
-- It is language-agnostic and does not hardcode Hindi or Arabic.
+---
 
-## Problem 3: Latency Degraded from 1.2s to 8-12s Over Two Weeks
+## Problem 3: Latency Degradation
 
-### Diagnosis Log
+### Investigation
+I focused on issues that worsen over time without code changes.
 
-I started with causes that can worsen over time even when application code does not change. The first branch was infrastructure saturation: request queueing, exhausted worker concurrency, database contention, and vector index growth. The second branch was external dependency drift: slower upstream model API response, network issues, or autoscaling lag in a managed service. The third branch was data growth: a larger prompt, larger retrieved context, or a vector store whose query time has increased as new documents accumulated.
+### Possible Causes
+1. Traffic growth → queueing / worker saturation  
+2. Retrieval slowdown → larger index  
+3. External API delays  
 
-I would investigate these causes first:
+### Investigation Priority
+1. Queue wait time  
+2. Retrieval latency  
+3. Model/API latency  
 
-1. Traffic growth causing queueing or worker saturation.
-2. Retrieval/index growth causing slower search and larger prompt assembly.
-3. Upstream API latency or rate-limit backoff causing cumulative delay.
+### Root Cause
+Capacity pressure + retrieval growth.
 
-Why this order:
+### Concrete Fix
+- Add tracing (queue, retrieval, prompt, model)  
+- Limit context size  
+- Optimize retrieval index  
+- Scale concurrency  
+- Add caching  
 
-- The symptom worsened gradually over time with no code change, which is classic capacity pressure.
-- Queueing and retrieval growth are both usage-linked and commonly invisible until launch scale.
-- These causes can turn a 1-second service into a 10-second service without any prompt changes.
-
-Likely root cause:
-
-Capacity plus retrieval growth.
-
-Concrete fix:
-
-1. Add end-to-end tracing for retrieval time, prompt-build time, model latency, and queue wait time.
-2. Cap retrieved tokens and summarize redundant chunks before generation.
-3. Scale worker concurrency and connection pools based on observed throughput.
-4. Rebuild or optimize the retrieval index and add caching for repeated queries.
+---
 
 ## Post-Mortem Summary
 
-The chatbot issues came from three different layers of the system rather than a single model failure. Pricing errors were caused by the bot answering without reliably grounding itself in the current pricing source, which made it sound confident even when the underlying data was missing or stale. The language issue came from the instruction setup: because the system prompt was written in English and did not explicitly require matching the user’s language, the model sometimes fell back to English. The latency increase was not caused by a prompt change; it was more consistent with normal production growth effects such as larger queues, slower retrieval as data volume increased, and longer waits on external model calls.
+The chatbot issues were caused by three system weaknesses.
 
-We can fix these issues with targeted changes. For pricing, the bot should only answer from a validated pricing source and refuse otherwise. For language consistency, the system prompt should explicitly require responses in the user’s latest language. For latency, we need better tracing, tighter context limits, and capacity tuning across retrieval and inference. Together, these changes improve factual reliability, multilingual consistency, and response speed without changing the underlying product experience.
+Pricing errors occurred because the bot did not reliably check a live pricing source and instead used outdated information. Language issues happened because the system instructions did not enforce matching the user’s language, causing fallback to English. Latency increased due to higher usage, leading to delays in processing and retrieval.
+
+The fixes include grounding pricing answers in verified data, enforcing strict language rules, and improving system performance through monitoring and scaling. These changes will make the system more accurate, consistent, and faster.
 
 # Section 3: Fine-Tuning DistilBERT
 

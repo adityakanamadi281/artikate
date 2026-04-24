@@ -1,7 +1,3 @@
-# Artikate Assessment
-
-This repository contains working code and written answers for all four sections of the Artikate AI/ML/LLM Engineer assessment.
-
 ## Repository Layout
 
 ```text

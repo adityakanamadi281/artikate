@@ -133,7 +133,7 @@ What would improve separation:
 # Section 4: Written Systems Design Review
 
 ## Question A: Prompt Injection and LLM Security
-* Prompt Ingestion:
+###  Prompt Ingestion:
 Prompt ingestion is the structured process of handling user inputs in LLM systems.
 It includes input collection, sanitization, validation, and intent classification.
 Inputs are treated as untrusted and cleaned to prevent prompt injection attacks.
@@ -233,12 +233,12 @@ def filter_output(response):
 
 
 
-* LLM Security: 
-LLM security focuses on protecting models from misuse and malicious inputs.
-It uses input validation, output filtering, and strict prompt control.
-Techniques like least-privilege access and sandboxing limit system risks.
-Monitoring and logging help detect anomalies and attack patterns.
-Together, these ensure safe, reliable, and production-ready AI systems.
+### LLM Security: 
+* LLM security focuses on protecting models from misuse and malicious inputs.
+* It uses input validation, output filtering, and strict prompt control.
+* Techniques like least-privilege access and sandboxing limit system risks.
+* Monitoring and logging help detect anomalies and attack patterns.
+* Together, these ensure safe, reliable, and production-ready AI systems.
 
 
 ## Question B: Evaluating LLM Output Quality

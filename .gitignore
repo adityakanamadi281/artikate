@@ -1,0 +1,44 @@
+# Strict .gitignore: Block everything by default and only allow required files
+
+# 1. Ignore everything
+/*
+
+# 2. Allow specific root-level files
+!.gitignore
+!README.md
+!DESIGN.md
+!ANSWERS.md
+!.env.example
+!requirements.txt
+
+# 3. Allow directory structures (needed to reach nested files)
+!**/
+
+# 4. Allow Python source files in all sections
+!section1/**/*.py
+!section2/**/*.py
+!section3/**/*.py
+
+# 5. Allow essential data (input PDFs for Section 2)
+!section2/data/pdfs/*.pdf
+
+# 6. Allow .gitkeep files to maintain directory structure
+!**/.gitkeep
+
+# 7. Explicitly ignore sensitive/generated files even in allowed paths
+**/.env
+**/.venv/
+**/__pycache__/
+**/*.py[cod]
+**/.DS_Store
+**/Thumbs.db
+
+# 8. Explicitly ignore Section 2 and 3 generated artifacts
+section2/data/index/*
+!section2/data/index/.gitkeep
+
+section3/data/*.jsonl
+section3/data/dataset_summary.json
+
+section3/model/*
+!section3/model/.gitkeep

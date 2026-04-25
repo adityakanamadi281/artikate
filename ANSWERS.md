@@ -260,7 +260,7 @@ Evaluating LLM output quality involves assessing both retrieval performance (For
 #### Metrics
 1. Retrieval Metrics: MRR, nDCG, Recall@k, Precision@k
 2. Answer Generation Metrics: BELU, ROUGE, METEOR
-3. Answers Quality Evaluation: LLM-as-a-judge, human evaluation
+3. Answers Quality Evaluation: LLM-as-a-judge, human evaluation, Faithfulness, Toxicity
 
 
 LLM-as-a-judge method used to measure the quality of answers:

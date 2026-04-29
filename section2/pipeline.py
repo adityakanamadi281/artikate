@@ -2,21 +2,20 @@ from __future__ import annotations
 
 import argparse
 import json
-import math
 import os
 import pickle
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Sequence
+from typing import Dict, List, Sequence, Tuple
 
-import faiss
-import numpy as np
 from google import genai
-from sentence_transformers import SentenceTransformer
 from dotenv import load_dotenv
+from langchain_core.documents import Document
+from langchain_huggingface import HuggingFaceEmbeddings
+from langchain_community.vectorstores import FAISS
 
-from ingest import EMBEDDING_MODEL_NAME, tokenize_for_bm25
+from ingest import EMBEDDING_MODEL_NAME
 
 # Load environment variables from the root .env file
 load_dotenv(Path(__file__).parent.parent / ".env")
@@ -24,114 +23,76 @@ load_dotenv(Path(__file__).parent.parent / ".env")
 
 @dataclass
 class RetrievedChunk:
-    idx: int
+    chunk_id: str
     dense_score: float
     sparse_score: float
     hybrid_score: float
-    metadata: Dict[str, object]
+    document: Document
+
+
+def tokenize_for_bm25(text: str) -> List[str]:
+    return re.findall(r"\b\w+\b", text.lower())
 
 
 class LegalRAGPipeline:
     def __init__(self, index_dir: Path, use_gemini: bool = True) -> None:
         self.index_dir = index_dir
-        self.model = SentenceTransformer(EMBEDDING_MODEL_NAME)
-        self.index = faiss.read_index(str(index_dir / "chunks.faiss"))
-        self.embeddings = np.load(index_dir / "embeddings.npy")
-        with open(index_dir / "chunks.json", "r", encoding="utf-8") as fp:
-            self.chunks: List[Dict[str, object]] = json.load(fp)
+        self.embeddings = HuggingFaceEmbeddings(model_name=EMBEDDING_MODEL_NAME)
+        self.vectorstore = FAISS.load_local(
+            str(index_dir / "faiss_index"),
+            self.embeddings,
+            allow_dangerous_deserialization=True,
+        )
         with open(index_dir / "bm25.pkl", "rb") as fp:
             self.bm25 = pickle.load(fp)
+        self.bm25.k = 12
+        self.dense_retriever = self.vectorstore.as_retriever(
+            search_type="mmr",
+            search_kwargs={"k": 12, "fetch_k": 20},
+        )
         self.gemini_model_name = os.getenv("GEMINI_MODEL", "gemma-4-26b-a4b-it")
         self.gemini_enabled = use_gemini and bool(os.getenv("GEMINI_API_KEY"))
         self.gemini_client = genai.Client() if self.gemini_enabled else None
 
-    def _dense_search(self, question: str, top_k: int = 12) -> Dict[int, float]:
-        query = self.model.encode([question], convert_to_numpy=True).astype("float32")
-        faiss.normalize_L2(query)
-        scores, indices = self.index.search(query, top_k)
-        return {int(idx): float(score) for idx, score in zip(indices[0], scores[0]) if idx != -1}
-
-    def _sparse_search(self, question: str, top_k: int = 12) -> Dict[int, float]:
-        scores = self.bm25.get_scores(tokenize_for_bm25(question))
-        top_indices = np.argsort(scores)[::-1][:top_k]
-        return {int(idx): float(scores[idx]) for idx in top_indices}
-
     @staticmethod
-    def _normalize_scores(score_map: Dict[int, float]) -> Dict[int, float]:
-        if not score_map:
-            return {}
-        values = np.array(list(score_map.values()), dtype=float)
-        min_v, max_v = float(values.min()), float(values.max())
-        if math.isclose(min_v, max_v):
-            return {idx: 1.0 for idx in score_map}
-        return {idx: (score - min_v) / (max_v - min_v) for idx, score in score_map.items()}
+    def _doc_key(doc: Document) -> str:
+        chunk_id = str(doc.metadata.get("chunk_id", ""))
+        if chunk_id:
+            return chunk_id
+        return f"{doc.metadata.get('document', '')}:{doc.metadata.get('page', '')}:{hash(doc.page_content)}"
 
     def _hybrid_candidates(self, question: str, top_k: int = 8) -> List[RetrievedChunk]:
-        dense = self._dense_search(question)
-        sparse = self._sparse_search(question)
-        dense_n = self._normalize_scores(dense)
-        sparse_n = self._normalize_scores(sparse)
+        dense_docs = self.dense_retriever.invoke(question)
+        sparse_docs = self.bm25.invoke(question)
 
-        candidate_ids = set(dense_n) | set(sparse_n)
+        dense_ranks: Dict[str, Tuple[float, Document]] = {}
+        sparse_ranks: Dict[str, Tuple[float, Document]] = {}
+
+        for rank, doc in enumerate(dense_docs):
+            dense_ranks[self._doc_key(doc)] = (1.0 / (rank + 1), doc)
+
+        for rank, doc in enumerate(sparse_docs):
+            sparse_ranks[self._doc_key(doc)] = (1.0 / (rank + 1), doc)
+
+        combined_keys = set(dense_ranks) | set(sparse_ranks)
         candidates: List[RetrievedChunk] = []
-        for idx in candidate_ids:
-            dense_score = dense_n.get(idx, 0.0)
-            sparse_score = sparse_n.get(idx, 0.0)
+        for key in combined_keys:
+            dense_score, dense_doc = dense_ranks.get(key, (0.0, None))
+            sparse_score, sparse_doc = sparse_ranks.get(key, (0.0, None))
+            doc = dense_doc or sparse_doc
             hybrid_score = 0.6 * dense_score + 0.4 * sparse_score
             candidates.append(
                 RetrievedChunk(
-                    idx=idx,
+                    chunk_id=key,
                     dense_score=dense_score,
                     sparse_score=sparse_score,
                     hybrid_score=hybrid_score,
-                    metadata=self.chunks[idx],
+                    document=doc,
                 )
             )
 
-        ranked = sorted(candidates, key=lambda item: item.hybrid_score, reverse=True)
-        return self._mmr(question, ranked, top_k=top_k)
-
-    def _mmr(
-        self,
-        question: str,
-        ranked: Sequence[RetrievedChunk],
-        top_k: int = 8,
-        lambda_param: float = 0.75,
-    ) -> List[RetrievedChunk]:
-        if not ranked:
-            return []
-        query_vec = self.model.encode([question], convert_to_numpy=True).astype("float32")
-        faiss.normalize_L2(query_vec)
-        selected: List[RetrievedChunk] = []
-        candidates = list(ranked)
-
-        while candidates and len(selected) < top_k:
-            if not selected:
-                selected.append(candidates.pop(0))
-                continue
-
-            best_idx = None
-            best_score = float("-inf")
-            for i, candidate in enumerate(candidates):
-                candidate_vec = self.embeddings[candidate.idx : candidate.idx + 1].copy()
-                faiss.normalize_L2(candidate_vec)
-                query_sim = float(np.dot(query_vec[0], candidate_vec[0]))
-                max_sim_to_selected = max(
-                    float(np.dot(candidate_vec[0], self._normalized_embedding(sel.idx)))
-                    for sel in selected
-                )
-                mmr_score = lambda_param * query_sim - (1 - lambda_param) * max_sim_to_selected
-                if mmr_score > best_score:
-                    best_score = mmr_score
-                    best_idx = i
-
-            selected.append(candidates.pop(best_idx))
-        return selected
-
-    def _normalized_embedding(self, idx: int) -> np.ndarray:
-        vec = self.embeddings[idx].astype("float32").copy()
-        norm = np.linalg.norm(vec)
-        return vec if norm == 0 else vec / norm
+        candidates.sort(key=lambda item: item.hybrid_score, reverse=True)
+        return candidates[:top_k]
 
     @staticmethod
     def _sentences(text: str) -> List[str]:
@@ -143,7 +104,7 @@ class LegalRAGPipeline:
         best_sentence = None
         best_score = -1.0
         for item in retrieved:
-            for sentence in self._sentences(str(item.metadata["text"])):
+            for sentence in self._sentences(item.document.page_content):
                 sentence_terms = set(tokenize_for_bm25(sentence))
                 lexical_overlap = len(question_terms & sentence_terms)
                 score = lexical_overlap + item.hybrid_score
@@ -163,9 +124,9 @@ class LegalRAGPipeline:
         for item in retrieved:
             context_blocks.append(
                 (
-                    f"Document: {item.metadata['document']}\n"
-                    f"Page: {item.metadata['page']}\n"
-                    f"Chunk:\n{item.metadata['text']}"
+                    f"Document: {item.document.metadata['document']}\n"
+                    f"Page: {item.document.metadata['page']}\n"
+                    f"Chunk:\n{item.document.page_content}"
                 )
             )
 
@@ -210,9 +171,9 @@ class LegalRAGPipeline:
 
         sources = [
             {
-                "document": item.metadata["document"],
-                "page": item.metadata["page"],
-                "chunk": item.metadata["text"],
+                "document": item.document.metadata["document"],
+                "page": item.document.metadata["page"],
+                "chunk": item.document.page_content,
             }
             for item in retrieved
         ]
